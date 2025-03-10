@@ -2,3 +2,9 @@ pandas
 pytest
 transformers
 torch
+numpy
+scikit-learn
+joblib
+datasets
+
+

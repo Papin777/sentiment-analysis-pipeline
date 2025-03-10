@@ -1,133 +1,105 @@
 import os
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
-from transformers import BertForSequenceClassification, AutoTokenizer, get_scheduler
-from sklearn.model_selection import train_test_split
 import pandas as pd
-import numpy as np
-from tqdm import tqdm
+import re
+from datasets import Dataset
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, TrainingArguments, Trainer
+from unidecode import unidecode  # Pour gérer les caractères accentués
 
-# 🚨 Désactiver le warning sur les symlinks si nécessaire (Windows)
-os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+# 📌 Définition des hyperparamètres
+MODEL_NAME = "bert-base-uncased"
+EPOCHS = 3
+BATCH_SIZE = 8
+OUTPUT_DIR = "models/sentiment_model"
 
-# 📌 Configuration du modèle et des hyperparamètres
-MODEL_NAME = "bert-base-cased"
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-EPOCHS = 5
-BATCH_SIZE = 16
-MAX_LEN = 128
-LEARNING_RATE = 1e-5  # Réduction du learning rate
+# 📌 Vérification du GPU
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"🚀 Utilisation du périphérique : {device}")
 
-# 📌 Charger le tokenizer et le modèle BERT avec du Dropout pour éviter l’overfitting
-model = BertForSequenceClassification.from_pretrained(
-    MODEL_NAME,
-    num_labels=2,
-    hidden_dropout_prob=0.3,
-    attention_probs_dropout_prob=0.3
-)
-model.to(DEVICE)
-
-# 📌 Charger le tokenizer
+# 📌 Chargement du tokenizer
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
-# 📌 Fonction de tokenization
-def tokenize_data(texts, labels):
-    encodings = tokenizer(texts, truncation=True, padding=True, max_length=MAX_LEN, return_tensors="pt")
-    return TensorDataset(encodings["input_ids"], encodings["attention_mask"], torch.tensor(labels))
+def clean_text(text):
+    """Nettoie le texte en supprimant les caractères spéciaux et en mettant en minuscules."""
+    text = str(text).lower()
+    text = unidecode(text)  # Convertit "génial" en "genial"
+    text = re.sub(r"[^a-zA-Z0-9\s]", "", text)  # Supprime la ponctuation et caractères spéciaux
+    text = re.sub(r"\s+", " ", text).strip()  # Supprime les espaces en trop
+    return text
 
-# 📌 Charger les données d'entraînement (Équilibrées)
-df = pd.DataFrame({
-    "content": [
-        "I love this movie!", "This film was terrible.", "Amazing experience!", 
-        "I hate this movie", "Just okay", "Best movie ever!", "Worst film ever.",
-        "Really enjoyed it!", "Not my type of film.", "Loved every second of it!"
-    ],
-    "sentiment": [1, 0, 1, 0, 0, 1, 0, 1, 0, 1]  # 1 = positif, 0 = négatif
-})
+def label_sentiment(score):
+    """Convertit les scores en catégories de sentiment."""
+    if score <= 2:
+        return 0  # Négatif
+    elif score == 3:
+        return 1  # Neutre
+    else:
+        return 2  # Positif
 
-# 📌 Vérifier la distribution des classes
-print("📊 Distribution des labels :\n", df["sentiment"].value_counts())
+def tokenize_function(examples):
+    """Tokenisation des textes."""
+    return tokenizer(examples["clean_text"], padding="max_length", truncation=True)
 
-# 📌 Séparer en train / validation (Stratifié pour éviter le déséquilibre)
-train_texts, val_texts, train_labels, val_labels = train_test_split(
-    df["content"], df["sentiment"], test_size=0.2, random_state=42, stratify=df["sentiment"]
+def load_and_prepare_data(filepath):
+    """Charge les données, applique le nettoyage et prépare le dataset pour l'entraînement."""
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"❌ Le fichier {filepath} n'existe pas !")
+
+    df = pd.read_csv(filepath)
+
+    required_columns = {"content", "score"}
+    if not required_columns.issubset(df.columns):
+        raise KeyError(f"❌ Colonnes requises manquantes : {required_columns - set(df.columns)}")
+
+    df = df.dropna(subset=["content", "score"])  # Suppression des lignes vides
+    df["clean_text"] = df["content"].apply(clean_text)  # Nettoyage du texte
+    df["label"] = df["score"].apply(label_sentiment)  # Conversion en labels numériques
+
+    dataset = Dataset.from_pandas(df[["clean_text", "label"]])
+    tokenized_datasets = dataset.map(tokenize_function, batched=True)
+
+    return tokenized_datasets  # Retourne le dataset complet (pas seulement "train")
+
+# 📌 Chargement des données
+data_file = os.path.abspath(os.path.join(os.getcwd(), "dataset.csv"))
+tokenized_datasets = load_and_prepare_data(data_file)
+
+# 📌 Division des données en ensembles d'entraînement et de validation
+train_test_split = tokenized_datasets.train_test_split(test_size=0.1)  # 10% pour la validation
+train_dataset = train_test_split["train"]
+eval_dataset = train_test_split["test"]
+
+# 📌 Chargement du modèle pré-entraîné
+model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=3).to(device)
+
+# 📌 Configuration des arguments d'entraînement (avec évaluation)
+training_args = TrainingArguments(
+    output_dir=OUTPUT_DIR,
+    evaluation_strategy="epoch",  # Évaluer à la fin de chaque époque
+    per_device_train_batch_size=BATCH_SIZE,
+    num_train_epochs=EPOCHS,
+    weight_decay=0.01,
+    save_strategy="epoch",  # Sauvegarder à la fin de chaque époque
+    logging_dir="logs",  # Dossier pour les logs
+    logging_steps=10,  # Enregistrer les logs tous les 10 pas
 )
 
-train_dataset = tokenize_data(train_texts.tolist(), train_labels.tolist())
-val_dataset = tokenize_data(val_texts.tolist(), val_labels.tolist())
-
-train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
-
-# 📌 Optimizer et scheduler
-optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE)
-
-scheduler = get_scheduler(
-    "cosine",  # Courbe plus douce que "linear"
-    optimizer=optimizer,
-    num_warmup_steps=100,
-    num_training_steps=EPOCHS * len(train_loader),
+# 📌 Création du Trainer
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=train_dataset,
+    eval_dataset=eval_dataset,  # Ajouter l'ensemble de validation
+    tokenizer=tokenizer,
 )
 
-loss_fn = nn.CrossEntropyLoss()
+# 📌 Entraînement du modèle
+print("🚀 Entraînement du modèle en cours...")
+trainer.train()
+print("✅ Modèle entraîné avec succès !")
 
-# 📌 Fonction d'entraînement
-def train_model(model, train_loader, val_loader, optimizer, loss_fn, scheduler, epochs):
-    best_accuracy = 0
+# 📌 Sauvegarde du modèle
+model.save_pretrained(OUTPUT_DIR)
+tokenizer.save_pretrained(OUTPUT_DIR)
 
-    for epoch in range(epochs):
-        print(f"\n🚀 Epoch {epoch+1}/{epochs}")
-        model.train()
-        total_loss, correct = 0, 0
-
-        # Utilisation de tqdm pour voir la progression
-        for batch in tqdm(train_loader, desc="Training", leave=False):
-            input_ids, attention_mask, labels = [x.to(DEVICE) for x in batch]
-
-            optimizer.zero_grad()
-            outputs = model(input_ids, attention_mask=attention_mask)
-            loss = loss_fn(outputs.logits, labels)
-            loss.backward()
-            optimizer.step()
-            scheduler.step()
-
-            total_loss += loss.item()
-            correct += (outputs.logits.argmax(dim=1) == labels).sum().item()
-
-        train_acc = correct / len(train_dataset)
-        print(f"📊 Train Loss: {total_loss:.4f}, Train Accuracy: {train_acc:.4f}")
-
-        # 📌 Évaluation
-        model.eval()
-        correct, val_loss = 0, 0
-        with torch.no_grad():
-            for batch in val_loader:
-                input_ids, attention_mask, labels = [x.to(DEVICE) for x in batch]
-                outputs = model(input_ids, attention_mask=attention_mask)
-                val_loss += loss_fn(outputs.logits, labels).item()
-                correct += (outputs.logits.argmax(dim=1) == labels).sum().item()
-
-        val_acc = correct / len(val_dataset)
-        print(f"📊 Validation Loss: {val_loss:.4f}, Validation Accuracy: {val_acc:.4f}")
-
-        # 🚀 Sauvegarde du meilleur modèle
-        if val_acc > best_accuracy:
-            torch.save(model.state_dict(), "best_model.pth")
-            best_accuracy = val_acc
-            print("✅ Best model saved!")
-
-# 📌 Test rapide des prédictions avant d'entraîner
-model.eval()
-with torch.no_grad():
-    input_ids, attention_mask, labels = next(iter(val_loader))
-    input_ids, attention_mask = input_ids.to(DEVICE), attention_mask.to(DEVICE)
-    outputs = model(input_ids, attention_mask=attention_mask)
-    print("\n🔍 Test des prédictions sur l'ensemble de validation :")
-    print("Logits:", outputs.logits)
-    print("Prédictions:", torch.argmax(outputs.logits, dim=1))
-    print("Vrais labels:", labels)
-
-# 📌 Exécuter l'entraînement
-train_model(model, train_loader, val_loader, optimizer, loss_fn, scheduler, EPOCHS)
+print(f"✅ Modèle sauvegardé dans : {OUTPUT_DIR}")
