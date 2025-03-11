@@ -1,10 +1,14 @@
+
+import os
 import pandas as pd
 import re
 from transformers import AutoTokenizer
-from unidecode import unidecode  # Nouvelle importation
+from unidecode import unidecode  # Pour gérer les caractères accentués
+from datasets import Dataset
 
-# Charger le tokenizer BERT
-tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+# 📌 Chargement du tokenizer BERT
+MODEL_NAME = "bert-base-uncased"
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
 def clean_text(text):
     """Nettoie le texte en supprimant les caractères spéciaux et en mettant en minuscules."""
@@ -17,28 +21,41 @@ def clean_text(text):
 def label_sentiment(score):
     """Convertit les scores en catégories de sentiment."""
     if score <= 2:
-        return "negative"
+        return 0  # Négatif
     elif score == 3:
-        return "neutral"
+        return 1  # Neutre
     else:
-        return "positive"
+        return 2  # Positif
 
-def preprocess_data(df):
-    """Applique le nettoyage et la tokenisation des textes."""
-    # Vérifier si les colonnes existent
-    if "content" not in df.columns or "score" not in df.columns:
-        print(f"Colonnes disponibles : {df.columns}")
-        raise KeyError("Les colonnes 'content' et 'score' sont absentes du fichier CSV.")
+def tokenize_function(examples):
+    """Tokenisation des textes."""
+    return tokenizer(examples["clean_text"], padding="max_length", truncation=True)
 
-    df = df.dropna(subset=["content", "score"])  # Supprimer les lignes avec valeurs manquantes
-    df["clean_text"] = df["content"].apply(clean_text)  # Nettoyage
-    df["tokens"] = df["clean_text"].apply(lambda x: tokenizer(x, padding="max_length", truncation=True))  # Tokenisation
-    df["sentiment"] = df["score"].apply(label_sentiment)  # Attribution des labels
+def load_and_prepare_data(filepath):
+    """Charge les données, applique le nettoyage et prépare le dataset pour l'entraînement."""
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"❌ Le fichier {filepath} n'existe pas !")
 
-    return df
+    df = pd.read_csv(filepath)
 
-# Test rapide
+    required_columns = {"content", "score"}
+    if not required_columns.issubset(df.columns):
+        raise KeyError(f"❌ Colonnes requises manquantes : {required_columns - set(df.columns)}")
+
+    df = df.dropna(subset=["content", "score"])  # Suppression des lignes vides
+    df["clean_text"] = df["content"].apply(clean_text)  # Nettoyage du texte
+    df["label"] = df["score"].apply(label_sentiment)  # Conversion en labels numériques
+
+    dataset = Dataset.from_pandas(df[["clean_text", "label"]])
+    tokenized_datasets = dataset.map(tokenize_function, batched=True)
+
+    return tokenized_datasets
+
+# 📌 Test rapide
 if __name__ == "__main__":
-    df = pd.read_csv(r'C:\Users\moudi\sentiment-analysis-pipeline\dataset.csv')
-    df = preprocess_data(df)
-    print(df[["content", "clean_text", "tokens", "sentiment"]].head())
+    data_file = os.path.abspath(os.path.join(os.getcwd(), "dataset.csv"))
+    try:
+        tokenized_datasets = load_and_prepare_data(data_file)
+        print("✅ Données prétraitées avec succès !")
+    except Exception as e:
+        print(f"❌ Erreur lors du prétraitement des données : {e}")
