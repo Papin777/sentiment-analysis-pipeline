@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 import pandas as pd
 import os
 import logging
@@ -49,3 +50,5 @@ if __name__ == "__main_":
         print(df.head())
     else:
         logging.error("⚠ Impossible d'afficher les données, vérifie le fichier CSV!")
+=======
+>>>>>>> 94337f9 (Suppression du contenu de data_extraction.py)
