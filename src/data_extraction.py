@@ -38,7 +38,7 @@ def load_data(filepath, encoding="utf-8"):
         return None
 
 # Test rapide
-if __name__ == "_main_":
+if __name__ == "__main__":
     # ⚠ Modifier ce chemin selon l'emplacement du fichier dataset.csv sur ton PC
     filepath = os.path.join(os.getcwd(), r"C:\Users\nongo\sentiment-analysis-pipeline\dataset.csv")
 
